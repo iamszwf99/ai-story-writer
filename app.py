@@ -271,6 +271,14 @@ def init_session_state():
         st.session_state.current_story_id = None
     if 'current_polish_session' not in st.session_state:
         st.session_state.current_polish_session = None
+    if 'story_mode' not in st.session_state:
+        st.session_state.story_mode = 'new'
+    if 'pending_ai_continuation' not in st.session_state:
+        st.session_state.pending_ai_continuation = False
+    if 'temp_user_chapter' not in st.session_state:
+        st.session_state.temp_user_chapter = ""
+    if 'temp_ai_style' not in st.session_state:
+        st.session_state.temp_ai_style = "creative"
 
 # Main app
 def main():
@@ -290,156 +298,199 @@ def main():
         st.warning("🔑 Please configure your OpenAI API key to use AI features")
         return
     
-    # Sidebar navigation
+    # Sidebar navigation - Updated order
     with st.sidebar:
         st.header("📚 Navigation")
-        mode = st.radio("Choose mode:", ["📖 Story Writing", "✨ Text Polishing", "📊 My Stories"])
-        
-        st.divider()
-        st.markdown("### 🎭 AI Style Options")
-        st.markdown("- **Creative**: Original and imaginative")
-        st.markdown("- **Funny**: Humorous and lighthearted") 
-        st.markdown("- **Spooky**: Dark and mysterious")
-        st.markdown("- **Surprise**: Unexpected twists")
-        st.markdown("- **Dramatic**: Intense and emotional")
+        mode = st.radio("Choose mode:", ["✨ Text Polishing", "📖 Story Writing", "📊 Story List"])
     
-    if mode == "📖 Story Writing":
-        story_writing_mode(client)
-    elif mode == "✨ Text Polishing":
+    if mode == "✨ Text Polishing":
         text_polishing_mode(client)
+    elif mode == "📖 Story Writing":
+        story_writing_mode(client)
     else:
-        story_management_mode()
+        story_list_mode()
 
 def story_writing_mode(client):
     st.header("📖 Collaborative Story Writing")
     
-    # Story selection/creation
-    col1, col2 = st.columns([2, 1])
-    
+    # Row 1: Choose to create new story or continue existing
+    col1, col2 = st.columns(2)
     with col1:
-        stories = get_stories()
-        if stories:
-            story_options = ["➕ New Story"] + [f"📚 {s[1]} (Created: {s[2][:10]})" for s in stories]
-            selected = st.selectbox("Choose or create a story:", story_options)
-            
-            if selected != "➕ New Story":
-                story_id = stories[story_options.index(selected) - 1][0]
-                st.session_state.current_story_id = story_id
-        else:
-            st.info("👋 No stories yet! Create your first story below.")
+        if st.button("➕ Create New Story", type="primary" if st.session_state.story_mode == 'new' else "secondary"):
+            st.session_state.story_mode = 'new'
             st.session_state.current_story_id = None
+            st.rerun()
     
     with col2:
-        if st.button("🗑️ Clear Current Story", help="Start fresh"):
-            st.session_state.current_story_id = None
-            st.rerun()
+        stories = get_stories()
+        if stories:
+            if st.button("📚 Continue Existing Story", type="primary" if st.session_state.story_mode == 'continue' else "secondary"):
+                st.session_state.story_mode = 'continue'
+                st.rerun()
     
-    # Create new story
-    if st.session_state.current_story_id is None:
-        st.subheader("✨ Start Your Story")
+    # Row 2: Story name input/display
+    if st.session_state.story_mode == 'new':
+        story_title = st.text_input("📝 Story Title:", placeholder="Enter your story title...")
         
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            title = st.text_input("📚 Story Title:", placeholder="Enter a compelling title...")
-        with col2:
-            if st.button("🎯 Generate Title Ideas"):
-                if client:
-                    with st.spinner("🤔 Thinking of titles..."):
-                        response = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": "Generate 5 creative story titles. Return only the titles, one per line."}],
-                            max_tokens=100
-                        )
-                        st.write("💡 **Suggestions:**")
-                        for line in response.choices[0].message.content.strip().split('\n'):
-                            if line.strip():
-                                st.write(f"• {line.strip()}")
-        
-        user_start = st.text_area("✍️ Write your opening:", height=150, 
-                                placeholder="Once upon a time, in a world where...")
-        
-        if title and user_start and st.button("🚀 Create Story", type="primary"):
-            story_id = create_story(title, user_start)
-            st.session_state.current_story_id = story_id
-            st.success(f"📚 Created '{title}' successfully!")
-            st.rerun()
+        if story_title:
+            # Two columns for writing interface
+            col_left, col_right = st.columns(2)
+            
+            with col_left:
+                st.markdown("### ✍️ Your Writing")
+                user_text = st.text_area("Start your story (minimum 200 words):", height=400, 
+                                       placeholder="Begin your story here...")
+                
+                word_count = len(user_text.split())
+                st.markdown(f"**Word count:** {word_count}/200")
+                
+                if word_count >= 200:
+                    st.markdown("### 🎭 AI Continuation Style")
+                    ai_style = st.selectbox("Choose AI style:", ["creative", "funny", "surprise", "spooky"])
+                    
+                    if st.button("🚀 Create Story & Generate AI Continuation", type="primary"):
+                        # Create story
+                        story_id = create_story(story_title, user_text)
+                        st.session_state.current_story_id = story_id
+                        st.session_state.story_mode = 'continue'
+                        st.session_state.temp_user_chapter = user_text
+                        st.session_state.temp_ai_style = ai_style
+                        st.session_state.pending_ai_continuation = True
+                        st.rerun()
+                else:
+                    st.info(f"📝 Please write at least {200 - word_count} more words to continue.")
+            
+            with col_right:
+                st.markdown("### 🤖 AI Continuation")
+                st.info("💡 Write at least 200 words to unlock AI continuation")
     
-    # Continue existing story
-    else:
-        story_details = get_story_details(st.session_state.current_story_id)
-        chapters = get_chapters(st.session_state.current_story_id)
-        
-        if story_details:
-            st.subheader(f"📚 {story_details[0]}")
-            
-            # Display story progression
-            st.markdown("### 📖 Story So Far")
-            
-            # Original start
-            with st.expander("📝 Your Opening", expanded=len(chapters) == 0):
-                st.markdown(f"*{story_details[1]}*")
-            
-            # Display chapters
-            for i, (ch_num, user_content, ai_content, ai_style, user_rating, ai_rating) in enumerate(chapters):
-                col1, col2 = st.columns(2)
+    elif st.session_state.story_mode == 'continue':
+        if not st.session_state.current_story_id:
+            # Select story to continue
+            stories = get_stories()
+            if stories:
+                story_options = [f"{s[1]}" for s in stories]
+                selected_title = st.selectbox("Select a story to continue:", story_options)
                 
-                with col1:
-                    st.markdown(f"**Chapter {ch_num} - Your Writing**")
-                    if ai_rating:
-                        st.markdown(f"🤖 AI Rating: {'⭐' * ai_rating}")
-                    st.markdown(f"*{user_content}*")
+                if st.button("📖 Load Story"):
+                    selected_idx = story_options.index(selected_title)
+                    st.session_state.current_story_id = stories[selected_idx][0]
+                    st.rerun()
+            else:
+                st.info("No stories found. Create a new story first!")
+        else:
+            # Display story and continue writing
+            story_details = get_story_details(st.session_state.current_story_id)
+            chapters = get_chapters(st.session_state.current_story_id)
+            
+            if story_details:
+                st.markdown(f"## 📚 {story_details[0]}")
                 
-                with col2:
-                    st.markdown(f"**Chapter {ch_num} - AI Continuation** ({ai_style})")
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
+                # Handle pending AI continuation from new story creation
+                if st.session_state.pending_ai_continuation:
+                    # Rate user's writing
+                    user_rating_score, user_rating_text = rate_user_writing(client, st.session_state.temp_user_chapter)
+                    
+                    # Generate AI continuation
+                    ai_chapter = generate_next_chapter(client, st.session_state.temp_user_chapter, 
+                                                     st.session_state.temp_user_chapter, 
+                                                     st.session_state.temp_ai_style, [])
+                    
+                    # Save as first chapter
+                    add_chapter(st.session_state.current_story_id, 1, 
+                              st.session_state.temp_user_chapter, ai_chapter, 
+                              st.session_state.temp_ai_style, user_rating_score)
+                    
+                    st.session_state.pending_ai_continuation = False
+                    st.session_state.temp_user_chapter = ""
+                    st.session_state.temp_ai_style = "creative"
+                    st.rerun()
+                
+                # Display chapters in two columns
+                col_left, col_right = st.columns(2)
+                
+                with col_left:
+                    st.markdown("### ✍️ Your Writing")
+                    
+                    # Display original start
+                    with st.expander("📝 Original Opening", expanded=False):
+                        st.markdown(f"*{story_details[1]}*")
+                    
+                    # Display user chapters
+                    for ch_num, user_content, _, _, _, ai_rating in chapters:
+                        st.markdown(f"**Chapter {ch_num}**")
+                        if ai_rating:
+                            st.markdown(f"🤖 AI Rating: {'⭐' * ai_rating}")
+                        st.markdown(f"{user_content}")
+                        st.divider()
+                    
+                    # New chapter input
+                    st.markdown("### ✍️ Write Next Chapter")
+                    new_chapter = st.text_area("Continue your story (minimum 200 words):", 
+                                             height=300, key="new_chapter_input")
+                    
+                    word_count = len(new_chapter.split())
+                    st.markdown(f"**Word count:** {word_count}/200")
+                    
+                    if word_count >= 200:
+                        st.markdown("### 🎭 AI Continuation Style")
+                        ai_style = st.selectbox("Choose AI style:", ["creative", "funny", "surprise", "spooky"], 
+                                              key="ai_style_select")
+                        
+                        if st.button("🤖 Generate AI Continuation", type="primary"):
+                            # Build story context
+                            context = story_details[1] + "\n\n"
+                            for ch_num, user_cont, ai_cont, _, _, _ in chapters:
+                                context += f"Chapter {ch_num}: {user_cont}\n{ai_cont}\n\n"
+                            
+                            # Rate user's writing
+                            user_rating_score, user_rating_text = rate_user_writing(client, new_chapter)
+                            
+                            # Get previous ratings
+                            previous_ratings = get_user_rating_history(st.session_state.current_story_id)
+                            
+                            # Generate AI continuation
+                            ai_chapter = generate_next_chapter(client, context, new_chapter, 
+                                                             ai_style, previous_ratings)
+                            
+                            # Save chapter
+                            next_chapter_num = len(chapters) + 1
+                            add_chapter(st.session_state.current_story_id, next_chapter_num, 
+                                      new_chapter, ai_chapter, ai_style, user_rating_score)
+                            
+                            st.success(f"✅ Chapter {next_chapter_num} created!")
+                            st.info(f"💭 AI feedback on your writing: {user_rating_text}")
+                            st.rerun()
+                    else:
+                        st.info(f"📝 Please write at least {200 - word_count} more words to continue.")
+                
+                with col_right:
+                    st.markdown("### 🤖 AI Continuation")
+                    
+                    # Display AI chapters
+                    for ch_num, _, ai_content, ai_style, user_rating, _ in chapters:
+                        st.markdown(f"**Chapter {ch_num}** ({ai_style})")
+                        
+                        # Rating section
                         if user_rating:
                             st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
                         else:
-                            rating = st.selectbox(f"Rate AI Ch.{ch_num}:", [None, 1, 2, 3, 4, 5], 
-                                                key=f"rate_ch_{ch_num}")
-                            if rating and st.button(f"Submit Rating", key=f"submit_ch_{ch_num}"):
-                                update_chapter_rating(st.session_state.current_story_id, ch_num, rating)
-                                st.rerun()
-                    with col_b:
-                        pass
-                    st.markdown(f"*{ai_content}*")
-                
-                st.divider()
-            
-            # Add next chapter
-            st.markdown("### ✍️ Continue the Story")
-            
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                user_chapter = st.text_area("Write the next chapter:", height=120,
-                                          placeholder="Continue where the story left off...")
-            with col2:
-                style = st.selectbox("AI Style:", ["creative", "funny", "spooky", "surprise", "dramatic"])
-            
-            if user_chapter and st.button("🤖 Generate AI Continuation", type="primary"):
-                # Build story context
-                context = story_details[1] + "\n\n"
-                for ch_num, user_cont, ai_cont, _, _, _ in chapters:
-                    context += f"Chapter {ch_num}: {user_cont}\n{ai_cont}\n\n"
-                
-                # Rate user's writing
-                user_rating_score, user_rating_text = rate_user_writing(client, user_chapter)
-                
-                # Get previous ratings for AI improvement
-                previous_ratings = get_user_rating_history(st.session_state.current_story_id)
-                
-                # Generate AI continuation
-                ai_chapter = generate_next_chapter(client, context, user_chapter, style, previous_ratings)
-                
-                # Save chapter
-                next_chapter_num = len(chapters) + 1
-                add_chapter(st.session_state.current_story_id, next_chapter_num, 
-                          user_chapter, ai_chapter, style, user_rating_score)
-                
-                st.success(f"📚 Chapter {next_chapter_num} created! AI rated your writing: {user_rating_score}/5")
-                st.info(f"💭 AI feedback: {user_rating_text}")
-                st.rerun()
+                            col_a, col_b = st.columns([2, 1])
+                            with col_a:
+                                rating = st.selectbox(f"Rate this chapter:", 
+                                                    [None, 1, 2, 3, 4, 5], 
+                                                    key=f"rate_ch_{ch_num}")
+                            with col_b:
+                                if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
+                                    update_chapter_rating(st.session_state.current_story_id, 
+                                                        ch_num, rating)
+                                    st.rerun()
+                        
+                        st.markdown(f"{ai_content}")
+                        st.divider()
+                    
+                    if not chapters:
+                        st.info("💡 AI continuation will appear here after you write your first chapter")
 
 def text_polishing_mode(client):
     st.header("✨ Text Polishing Studio")
@@ -450,7 +501,7 @@ def text_polishing_mode(client):
     
     with col1:
         st.markdown("### 📝 Your Original Text")
-        original_text = st.text_area("Write or paste your text here:", height=300,
+        original_text = st.text_area("Write or paste your text here:", height=400,
                                    placeholder="Enter the text you'd like to improve...")
         
         if original_text:
@@ -477,7 +528,7 @@ def text_polishing_mode(client):
         st.markdown("### ✨ AI Enhanced Version")
         
         if st.session_state.current_polish_session:
-            # Display polished text (you'd fetch this from database)
+            # Display polished text
             conn = sqlite3.connect('writing_sessions.db')
             c = conn.cursor()
             c.execute("SELECT original_text, polished_text, ai_rating FROM polish_sessions WHERE id = ?", 
@@ -490,12 +541,12 @@ def text_polishing_mode(client):
                 ai_rating = result[2]
                 
                 st.markdown(f"🤖 **AI's rating of your original:** {'⭐' * ai_rating}/5")
-                st.markdown("---")
+                st.divider()
                 st.markdown(polished_text)
                 st.markdown(f"**Word count:** {len(polished_text.split())}")
                 
                 # Rating system
-                st.markdown("---")
+                st.divider()
                 st.markdown("### 📊 Rate the AI's Polish")
                 
                 col_a, col_b = st.columns(2)
@@ -503,17 +554,19 @@ def text_polishing_mode(client):
                     user_rating = st.selectbox("Your rating:", [None, 1, 2, 3, 4, 5])
                 with col_b:
                     if user_rating:
-                        feedback = st.text_input("Optional feedback:", placeholder="What could be better?")
+                        feedback = st.text_input("Optional feedback:", 
+                                               placeholder="What could be better?")
                         if st.button("Submit Rating"):
-                            update_polish_rating(st.session_state.current_polish_session, user_rating, feedback)
+                            update_polish_rating(st.session_state.current_polish_session, 
+                                               user_rating, feedback)
                             st.success("Thanks for your feedback! AI will improve.")
                             st.session_state.current_polish_session = None
                             st.rerun()
         else:
             st.info("👈 Enter text on the left to see AI improvements here")
 
-def story_management_mode():
-    st.header("📊 My Stories Dashboard")
+def story_list_mode():
+    st.header("📊 Story List")
     
     stories = get_stories()
     
@@ -521,26 +574,50 @@ def story_management_mode():
         st.info("📚 No stories yet! Create your first story in Story Writing mode.")
         return
     
-    for story_id, title, created_at in stories:
-        with st.expander(f"📚 {title} (Created: {created_at[:10]})"):
+    # Create a table-like display
+    for i, (story_id, title, created_at) in enumerate(stories, 1):
+        with st.expander(f"{i}. 📚 {title}"):
             chapters = get_chapters(story_id)
             
-            col1, col2, col3 = st.columns(3)
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
-                st.metric("📖 Chapters", len(chapters))
+                st.metric("📅 Created", created_at[:10])
+            
             with col2:
-                if chapters:
-                    avg_ai_rating = sum([ch[4] or 0 for ch in chapters]) / len(chapters)
-                    st.metric("🤖 Avg AI Rating", f"{avg_ai_rating:.1f}/5")
+                st.metric("📖 Chapters", len(chapters))
+            
             with col3:
-                user_ratings = [ch[5] for ch in chapters if ch[5]]
+                if chapters:
+                    ai_ratings = [ch[5] for ch in chapters if ch[5]]
+                    if ai_ratings:
+                        avg_ai_rating = sum(ai_ratings) / len(ai_ratings)
+                        st.metric("🤖 Avg AI Rating", f"{avg_ai_rating:.1f}/5")
+                    else:
+                        st.metric("🤖 Avg AI Rating", "N/A")
+            
+            with col4:
+                user_ratings = [ch[4] for ch in chapters if ch[4]]
                 if user_ratings:
                     avg_user_rating = sum(user_ratings) / len(user_ratings)
                     st.metric("👤 Your Avg Rating", f"{avg_user_rating:.1f}/5")
+                else:
+                    st.metric("👤 Your Avg Rating", "N/A")
             
-            if st.button(f"Continue '{title}'", key=f"continue_{story_id}"):
+            # Show chapter summary
+            if chapters:
+                st.markdown("**Chapter Summary:**")
+                for ch_num, _, _, ai_style, user_rating, ai_rating in chapters[-3:]:  # Show last 3 chapters
+                    st.markdown(f"• Chapter {ch_num} ({ai_style}) - "
+                              f"AI: {'⭐' * (ai_rating or 0)}, "
+                              f"You: {'⭐' * (user_rating or 0) if user_rating else 'Not rated'}")
+            
+            # Continue button
+            if st.button(f"📖 Continue This Story", key=f"continue_{story_id}"):
                 st.session_state.current_story_id = story_id
-                st.switch_page("story_writing")
+                st.session_state.story_mode = 'continue'
+                st.switch_page("pages/story_writing.py")  # Adjust based on your page structure
 
 if __name__ == "__main__":
     main()
