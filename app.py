@@ -762,58 +762,36 @@ def story_writing_mode(client):
                             ai_style = chapter_data[3]
                             user_rating = chapter_data[4]
                             ai_level = chapter_data[6] if len(chapter_data) > 6 else 'middle_school'
-                            
+
                             displayed_ai_chapters += 1
-                            
+
                             if displayed_ai_chapters == 1:
-                                ai_chapter_num = 2  # First AI chapter is always 2
+                                ai_chapter_num = 2
                             else:
-                                # For subsequent AI chapters, if first record had empty user_content
-                                if not chapters[0][1]:
-                                    ai_chapter_num = displayed_ai_chapters * 2
-                                else:
-                                    ai_chapter_num = displayed_ai_chapters * 2
-                            
+                                ai_chapter_num = displayed_ai_chapters * 2
+
                             level_display = {"professional": "Professional", "college": "College", "middle_school": "Middle School"}.get(ai_level, "Middle School")
                             st.markdown(f"**Chapter {ai_chapter_num}** ({ai_style}, {level_display} level)")
-                            
-                            # Rating section
+
                             if user_rating:
                                 st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
                             else:
                                 col_a, col_b = st.columns([2, 1])
                                 with col_a:
                                     rating = st.selectbox(f"Rate this chapter:", 
-                                                        [None, 1, 2, 3, 4, 5], 
-                                                        key=f"rate_ch_{ch_num}")
+                                                         [None, 1, 2, 3, 4, 5], 
+                                                         key=f"rate_ch_{ch_num}_unique")
                                 with col_b:
-                                    if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
+                                    if rating and st.button("Submit", key=f"submit_ch_{ch_num}_unique"):
                                         update_chapter_rating(st.session_state.current_story_id, 
-                                                            ch_num, rating)
+                                                              ch_num, rating)
                                         st.rerun()
-                            
+
                             st.markdown(f"{ai_content}")
                             st.caption(f"Word count: {len(ai_content.split())}")
                             st.divider()
                             
-                            # Rating section
-                            if user_rating:
-                                st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
-                            else:
-                                col_a, col_b = st.columns([2, 1])
-                                with col_a:
-                                    rating = st.selectbox(f"Rate this chapter:", 
-                                                        [None, 1, 2, 3, 4, 5], 
-                                                        key=f"rate_ch_{ch_num}")
-                                with col_b:
-                                    if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
-                                        update_chapter_rating(st.session_state.current_story_id, 
-                                                            ch_num, rating)
-                                        st.rerun()
-                            
-                            st.markdown(f"{ai_content}")
-                            st.divider()
-
+                        
 def text_polishing_mode(client):
     st.header("✨ Text Polishing Studio")
     st.markdown("*Get AI feedback and improvements on your writing*")
