@@ -89,6 +89,18 @@ def create_story(title, user_text):
     conn.close()
     return story_id
 
+def delete_story(story_id):
+    conn = sqlite3.connect('writing_sessions.db')
+    c = conn.cursor()
+    # Delete chapters first
+    c.execute("DELETE FROM chapters WHERE story_id = ?", (story_id,))
+    # Delete polish sessions
+    c.execute("DELETE FROM polish_sessions WHERE story_id = ?", (story_id,))
+    # Delete story
+    c.execute("DELETE FROM stories WHERE id = ?", (story_id,))
+    conn.commit()
+    conn.close()
+
 def get_stories():
     conn = sqlite3.connect('writing_sessions.db')
     c = conn.cursor()
@@ -156,6 +168,26 @@ def get_user_rating_history(story_id):
     conn.close()
     return ratings
 
+def store_ai_feedback(story_id, chapter_num, feedback):
+    """Store AI feedback for a chapter"""
+    conn = sqlite3.connect('writing_sessions.db')
+    c = conn.cursor()
+    # Store feedback in polish_sessions table temporarily
+    c.execute("INSERT INTO polish_sessions (story_id, original_text, polished_text, ai_rating, feedback, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+              (story_id, f"Chapter {chapter_num}", "", 0, feedback, datetime.datetime.now()))
+    conn.commit()
+    conn.close()
+
+def get_ai_feedback(story_id, chapter_num):
+    """Get AI feedback for a chapter"""
+    conn = sqlite3.connect('writing_sessions.db')
+    c = conn.cursor()
+    c.execute("SELECT feedback FROM polish_sessions WHERE story_id = ? AND original_text = ? ORDER BY created_at DESC LIMIT 1", 
+              (story_id, f"Chapter {chapter_num}"))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else None
+
 # AI Generation Functions
 def generate_next_chapter(client, story_context, user_chapter, style_direction, previous_ratings):
     """Generate next chapter based on user's writing and style direction"""
@@ -205,22 +237,35 @@ Continue this story with the style: {style_direction}"""
         return f"❌ Error generating chapter: {str(e)}"
 
 def rate_user_writing(client, user_text):
-    """AI rates user's writing (1-5 scale)"""
+    """AI rates user's writing (1-5 scale) with detailed feedback"""
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a writing critic. Rate the following text on a scale of 1-5 (5 being excellent) considering creativity, flow, grammar, and engagement. Respond with ONLY the number and a brief reason."},
+                {"role": "system", "content": """You are a constructive writing critic. Rate the following text on a scale of 1-5 (5 being excellent).
+                
+                Provide your response in this format:
+                Rating: [number]
+                Strengths: [What the writer did well - be specific]
+                Areas for improvement: [Constructive suggestions - be encouraging]
+                
+                Consider: creativity, flow, grammar, character development, dialogue, and engagement."""},
                 {"role": "user", "content": f"Rate this writing: {user_text}"}
             ],
-            max_tokens=100,
+            max_tokens=200,
             temperature=0.3
         )
         result = response.choices[0].message.content.strip()
+        
         # Extract rating number
         rating = 3  # default
-        if result and result[0].isdigit():
-            rating = int(result[0])
+        if "Rating:" in result:
+            try:
+                rating_line = result.split('\n')[0]
+                rating = int(rating_line.split(':')[1].strip())
+            except:
+                pass
+        
         return rating, result
     except:
         return 3, "Unable to rate at this time"
@@ -426,23 +471,34 @@ def story_writing_mode(client):
                 
                 # Handle pending AI continuation from new story creation
                 if st.session_state.pending_ai_continuation:
+                    # The original text is already in story_details[1], so we rate that
                     # Rate user's writing
-                    user_rating_score, user_rating_text = rate_user_writing(client, st.session_state.temp_user_chapter)
+                    user_rating_score, user_rating_text = rate_user_writing(client, story_details[1])
                     
-                    # Generate AI continuation
-                    ai_chapter = generate_next_chapter(client, st.session_state.temp_user_chapter, 
-                                                     st.session_state.temp_user_chapter, 
+                    # Generate AI continuation for the original text
+                    ai_chapter = generate_next_chapter(client, story_details[1], 
+                                                     story_details[1], 
                                                      st.session_state.temp_ai_style, [])
                     
-                    # Save as first chapter
+                    # Save as first chapter - but use empty string for user_content since original is in stories table
                     add_chapter(st.session_state.current_story_id, 1, 
-                              st.session_state.temp_user_chapter, ai_chapter, 
+                              "", ai_chapter, 
                               st.session_state.temp_ai_style, user_rating_score)
                     
+                    # Store AI feedback for Chapter 1 (the original opening)
+                    store_ai_feedback(st.session_state.current_story_id, 1, user_rating_text)
+                    
+                    # Store the feedback in session state to display
+                    st.session_state.initial_feedback = user_rating_text
                     st.session_state.pending_ai_continuation = False
                     st.session_state.temp_user_chapter = ""
                     st.session_state.temp_ai_style = "creative"
                     st.rerun()
+                
+                # Show initial feedback if available
+                if 'initial_feedback' in st.session_state:
+                    st.info(f"💭 AI feedback on your Chapter 1: {st.session_state.initial_feedback}")
+                    del st.session_state.initial_feedback
                 
                 # Display chapters in two columns
                 col_left, col_right = st.columns(2)
@@ -450,15 +506,34 @@ def story_writing_mode(client):
                 with col_left:
                     st.markdown("### ✍️ Your Writing")
                     
-                    # Display original start
-                    with st.expander("📝 Original Opening", expanded=False):
-                        st.markdown(f"*{story_details[1]}*")
+                    # Display original start as Chapter 1
+                    st.markdown("**Chapter 1**")
+                    # Check if there's stored feedback for the original opening
+                    opening_feedback = get_ai_feedback(st.session_state.current_story_id, 1)
+                    if opening_feedback and chapters:  # Only show if we have chapters (meaning it was rated)
+                        # Extract rating from first chapter if available
+                        if chapters and chapters[0][5]:
+                            st.markdown(f"🤖 AI Rating: {'⭐' * chapters[0][5]}")
+                        st.info(f"💭 AI Feedback: {opening_feedback}")
+                    st.markdown(f"{story_details[1]}")
+                    st.divider()
                     
-                    # Display user chapters
-                    for ch_num, user_content, _, _, _, ai_rating in chapters:
-                        st.markdown(f"**Chapter {ch_num}**")
+                    # Display user chapters (starting from chapter 3 if there are more chapters)
+                    displayed_user_chapters = 0
+                    for idx, (ch_num, user_content, _, _, _, ai_rating) in enumerate(chapters):
+                        if idx == 0 and not user_content:
+                            # Skip first record if it's empty (original is in story_details)
+                            continue
+                        
+                        displayed_user_chapters += 1
+                        user_chapter_num = displayed_user_chapters * 2 + 1  # User chapters: 3, 5, 7...
+                        st.markdown(f"**Chapter {user_chapter_num}**")
                         if ai_rating:
                             st.markdown(f"🤖 AI Rating: {'⭐' * ai_rating}")
+                            # Get and display AI feedback
+                            feedback = get_ai_feedback(st.session_state.current_story_id, user_chapter_num)
+                            if feedback:
+                                st.info(f"💭 AI Feedback: {feedback}")
                         st.markdown(f"{user_content}")
                         st.divider()
                     
@@ -498,7 +573,17 @@ def story_writing_mode(client):
                             add_chapter(st.session_state.current_story_id, next_chapter_num, 
                                       new_chapter, ai_chapter, st.session_state.selected_ai_style, user_rating_score)
                             
-                            st.success(f"✅ Chapter {next_chapter_num} created!")
+                            # Store AI feedback
+                            # If this is the first user continuation (after the original), it's chapter 3
+                            # Otherwise, calculate based on how many chapters exist
+                            if len(chapters) == 1:
+                                user_chapter_num = 3  # First user continuation after original
+                            else:
+                                user_chapter_num = len(chapters) * 2 + 1
+                            
+                            store_ai_feedback(st.session_state.current_story_id, user_chapter_num, user_rating_text)
+                            
+                            st.success(f"✅ Chapter {user_chapter_num} (your writing) and Chapter {user_chapter_num + 1} (AI continuation) created!")
                             st.info(f"💭 AI feedback on your writing: {user_rating_text}")
                             st.rerun()
                     
@@ -545,30 +630,61 @@ def story_writing_mode(client):
                 with col_right:
                     st.markdown("### 🤖 AI Continuation")
                     
-                    # Display AI chapters
-                    for ch_num, _, ai_content, ai_style, user_rating, _ in chapters:
-                        st.markdown(f"**Chapter {ch_num}** ({ai_style})")
-                        
-                        # Rating section
-                        if user_rating:
-                            st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
-                        else:
-                            col_a, col_b = st.columns([2, 1])
-                            with col_a:
-                                rating = st.selectbox(f"Rate this chapter:", 
-                                                    [None, 1, 2, 3, 4, 5], 
-                                                    key=f"rate_ch_{ch_num}")
-                            with col_b:
-                                if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
-                                    update_chapter_rating(st.session_state.current_story_id, 
-                                                        ch_num, rating)
-                                    st.rerun()
-                        
-                        st.markdown(f"{ai_content}")
-                        st.divider()
-                    
+                    # Display AI chapters (starting from chapter 2)
                     if not chapters:
                         st.info("💡 AI continuation will appear here after you write your first chapter")
+                    else:
+                        # All AI chapters
+                        displayed_ai_chapters = 0
+                        for idx, (ch_num, user_content, ai_content, ai_style, user_rating, _) in enumerate(chapters):
+                            displayed_ai_chapters += 1
+                            
+                            if displayed_ai_chapters == 1:
+                                ai_chapter_num = 2  # First AI chapter is always 2
+                            else:
+                                # For subsequent AI chapters, if first record had empty user_content
+                                if not chapters[0][1]:
+                                    ai_chapter_num = displayed_ai_chapters * 2
+                                else:
+                                    ai_chapter_num = displayed_ai_chapters * 2
+                            
+                            st.markdown(f"**Chapter {ai_chapter_num}** ({ai_style})")
+                            
+                            # Rating section
+                            if user_rating:
+                                st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
+                            else:
+                                col_a, col_b = st.columns([2, 1])
+                                with col_a:
+                                    rating = st.selectbox(f"Rate this chapter:", 
+                                                        [None, 1, 2, 3, 4, 5], 
+                                                        key=f"rate_ch_{ch_num}")
+                                with col_b:
+                                    if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
+                                        update_chapter_rating(st.session_state.current_story_id, 
+                                                            ch_num, rating)
+                                        st.rerun()
+                            
+                            st.markdown(f"{ai_content}")
+                            st.divider()
+                            
+                            # Rating section
+                            if user_rating:
+                                st.markdown(f"👤 Your Rating: {'⭐' * user_rating}")
+                            else:
+                                col_a, col_b = st.columns([2, 1])
+                                with col_a:
+                                    rating = st.selectbox(f"Rate this chapter:", 
+                                                        [None, 1, 2, 3, 4, 5], 
+                                                        key=f"rate_ch_{ch_num}")
+                                with col_b:
+                                    if rating and st.button("Submit", key=f"submit_ch_{ch_num}"):
+                                        update_chapter_rating(st.session_state.current_story_id, 
+                                                            ch_num, rating)
+                                        st.rerun()
+                            
+                            st.markdown(f"{ai_content}")
+                            st.divider()
 
 def text_polishing_mode(client):
     st.header("✨ Text Polishing Studio")
@@ -664,7 +780,9 @@ def story_list_mode():
                 st.metric("📅 Created", created_at[:10])
             
             with col2:
-                st.metric("📖 Chapters", len(chapters))
+                # Count total chapters including the original opening
+                total_chapters = 1 + (len(chapters) * 2) if chapters else 1
+                st.metric("📖 Total Chapters", total_chapters)
             
             with col3:
                 if chapters:
@@ -685,18 +803,52 @@ def story_list_mode():
             
             # Show chapter summary
             if chapters:
-                st.markdown("**Chapter Summary:**")
-                for ch_num, _, _, ai_style, user_rating, ai_rating in chapters[-3:]:  # Show last 3 chapters
-                    st.markdown(f"• Chapter {ch_num} ({ai_style}) - "
-                              f"AI: {'⭐' * (ai_rating or 0)}, "
-                              f"You: {'⭐' * (user_rating or 0) if user_rating else 'Not rated'}")
+                st.markdown("**Recent Activity:**")
+                # Always show the first AI response (Chapter 2)
+                st.markdown(f"• Chapters 1-2 ({chapters[0][3]}) - "
+                          f"Your opening: {'⭐' * (chapters[0][5] or 0)}, "
+                          f"AI response: {'⭐' * (chapters[0][4] or 0) if chapters[0][4] else 'Not rated'}")
+                
+                # Show additional chapters if they exist
+                if len(chapters) > 1:
+                    # Show the most recent chapter pair
+                    latest = chapters[-1]
+                    latest_user_ch = (len(chapters) - 1) * 2 + 1
+                    latest_ai_ch = latest_user_ch + 1
+                    st.markdown(f"• Chapters {latest_user_ch}-{latest_ai_ch} ({latest[3]}) - "
+                              f"Your writing: {'⭐' * (latest[5] or 0)}, "
+                              f"AI writing: {'⭐' * (latest[4] or 0) if latest[4] else 'Not rated'}")
             
-            # Continue button
-            if st.button(f"📖 Continue This Story", key=f"continue_{story_id}"):
-                st.session_state.current_story_id = story_id
-                st.session_state.story_mode = 'continue'
-                st.success("Story loaded! Switch to 📖 Story Writing mode to continue.")
-                st.rerun()
+            # Action buttons
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                if st.button(f"📖 Continue This Story", key=f"continue_{story_id}", use_container_width=True):
+                    st.session_state.current_story_id = story_id
+                    st.session_state.story_mode = 'continue'
+                    st.success("Story loaded! Switch to 📖 Story Writing mode to continue.")
+                    st.rerun()
+            
+            with col_b:
+                if st.button(f"🗑️ Delete", key=f"delete_{story_id}", type="secondary", use_container_width=True):
+                    st.session_state[f'confirm_delete_{story_id}'] = True
+                    st.rerun()
+            
+            # Confirmation dialog for deletion
+            if st.session_state.get(f'confirm_delete_{story_id}', False):
+                st.warning(f"⚠️ Are you sure you want to delete '{title}'? This cannot be undone!")
+                col_x, col_y = st.columns(2)
+                with col_x:
+                    if st.button(f"Yes, delete", key=f"confirm_yes_{story_id}", type="primary"):
+                        delete_story(story_id)
+                        st.session_state[f'confirm_delete_{story_id}'] = False
+                        if st.session_state.current_story_id == story_id:
+                            st.session_state.current_story_id = None
+                        st.success(f"Story '{title}' deleted successfully!")
+                        st.rerun()
+                with col_y:
+                    if st.button(f"Cancel", key=f"confirm_no_{story_id}"):
+                        st.session_state[f'confirm_delete_{story_id}'] = False
+                        st.rerun()
 
 if __name__ == "__main__":
     main()
