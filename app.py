@@ -58,10 +58,17 @@ def init_db():
                   user_content TEXT,
                   ai_content TEXT,
                   ai_style TEXT,
+                  ai_level TEXT,
                   user_rating INTEGER,
                   ai_rating INTEGER,
                   created_at TIMESTAMP,
                   FOREIGN KEY(story_id) REFERENCES stories(id))''')
+    
+    # Check if ai_level column exists, if not add it
+    c.execute("PRAGMA table_info(chapters)")
+    columns = [column[1] for column in c.fetchall()]
+    if 'ai_level' not in columns:
+        c.execute("ALTER TABLE chapters ADD COLUMN ai_level TEXT DEFAULT 'middle_school'")
     
     # Polish sessions table
     c.execute('''CREATE TABLE IF NOT EXISTS polish_sessions
@@ -120,16 +127,22 @@ def get_story_details(story_id):
 def get_chapters(story_id):
     conn = sqlite3.connect('writing_sessions.db')
     c = conn.cursor()
-    c.execute("SELECT chapter_number, user_content, ai_content, ai_style, user_rating, ai_rating FROM chapters WHERE story_id = ? ORDER BY chapter_number", (story_id,))
-    chapters = c.fetchall()
+    # Try to get with ai_level first
+    try:
+        c.execute("SELECT chapter_number, user_content, ai_content, ai_style, user_rating, ai_rating, ai_level FROM chapters WHERE story_id = ? ORDER BY chapter_number", (story_id,))
+        chapters = c.fetchall()
+    except:
+        # If ai_level doesn't exist, get without it and add default
+        c.execute("SELECT chapter_number, user_content, ai_content, ai_style, user_rating, ai_rating FROM chapters WHERE story_id = ? ORDER BY chapter_number", (story_id,))
+        chapters = [(ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], 'middle_school') for ch in c.fetchall()]
     conn.close()
     return chapters
 
-def add_chapter(story_id, chapter_number, user_content, ai_content, ai_style, ai_rating):
+def add_chapter(story_id, chapter_number, user_content, ai_content, ai_style, ai_level, ai_rating):
     conn = sqlite3.connect('writing_sessions.db')
     c = conn.cursor()
-    c.execute("INSERT INTO chapters (story_id, chapter_number, user_content, ai_content, ai_style, ai_rating, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (story_id, chapter_number, user_content, ai_content, ai_style, ai_rating, datetime.datetime.now()))
+    c.execute("INSERT INTO chapters (story_id, chapter_number, user_content, ai_content, ai_style, ai_level, ai_rating, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              (story_id, chapter_number, user_content, ai_content, ai_style, ai_level, ai_rating, datetime.datetime.now()))
     conn.commit()
     conn.close()
 
@@ -189,7 +202,7 @@ def get_ai_feedback(story_id, chapter_num):
     return result[0] if result else None
 
 # AI Generation Functions
-def generate_next_chapter(client, story_context, user_chapter, style_direction, previous_ratings):
+def generate_next_chapter(client, story_context, user_chapter, style_direction, writing_level, previous_ratings):
     """Generate next chapter based on user's writing and style direction"""
     try:
         # Build context based on previous ratings
@@ -201,8 +214,18 @@ def generate_next_chapter(client, story_context, user_chapter, style_direction, 
             elif avg_rating >= 4:
                 rating_context = "The user has been happy with previous content, maintain this quality level. "
         
+        # Define writing level instructions
+        level_instructions = {
+            "professional": "Write with sophisticated vocabulary, complex sentence structures, rich descriptions, and nuanced character development. Use literary devices while keeping content age-appropriate.",
+            "college": "Write with clear, engaging prose using varied vocabulary and sentence structures. Include good descriptions and character development at a young adult level.",
+            "middle_school": "Write with simple, clear language that's easy to understand. Use shorter sentences, familiar words, and straightforward descriptions. Keep the story exciting and fun for younger readers."
+        }
+        
         system_prompt = f"""You are a creative writing assistant helping to continue a story. 
         {rating_context}
+        
+        Writing Level: {writing_level}
+        {level_instructions.get(writing_level, level_instructions['middle_school'])}
         
         Style direction: {style_direction}
         
@@ -212,23 +235,25 @@ def generate_next_chapter(client, story_context, user_chapter, style_direction, 
         3. Apply the style direction: {style_direction}
         4. Keep chapters engaging and well-paced
         5. End with a compelling hook for the next chapter
-        6. Write 200-400 words
+        6. Write between 200-400 words typically, but NEVER exceed 1,000 words
+        7. Adjust complexity and vocabulary for the {writing_level} level
+        8. For middle school level, aim for 200-300 words to keep it digestible
         """
         
         user_prompt = f"""Story context: {story_context}
 
 User's latest chapter: {user_chapter}
 
-Continue this story with the style: {style_direction}"""
+Continue this story with the style: {style_direction} at a {writing_level} writing level."""
 
-        with st.spinner(f"🎭 Creating a {style_direction} continuation..."):
+        with st.spinner(f"🎭 Creating a {style_direction} continuation at {writing_level} level..."):
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=600,
+                max_tokens=1500,  # Increased to allow up to 1000 words
                 temperature=0.8
             )
             return response.choices[0].message.content.strip()
@@ -242,14 +267,15 @@ def rate_user_writing(client, user_text):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": """You are a constructive writing critic. Rate the following text on a scale of 1-5 (5 being excellent).
+                {"role": "system", "content": """You are a supportive and encouraging writing teacher. Rate the following text on a scale of 1-5 (5 being excellent).
                 
                 Provide your response in this format:
                 Rating: [number]
-                Strengths: [What the writer did well - be specific]
-                Areas for improvement: [Constructive suggestions - be encouraging]
+                Strengths: [What the writer did well - be specific and encouraging]
+                Areas for improvement: [Constructive suggestions - be gentle and positive]
                 
-                Consider: creativity, flow, grammar, character development, dialogue, and engagement."""},
+                Consider: creativity, flow, grammar, character development, dialogue, and engagement.
+                Remember to be encouraging and age-appropriate in your feedback."""},
                 {"role": "user", "content": f"Rate this writing: {user_text}"}
             ],
             max_tokens=200,
@@ -292,8 +318,9 @@ def polish_writing(client, original_text, previous_ratings):
         3. Maintain the author's voice and style
         4. Fix any errors
         5. Make it more engaging while keeping the core meaning
+        6. Keep polished text under 1,000 words
         
-        Preserve the original length and meaning."""
+        Preserve the original length and meaning. Do not exceed the original length by more than 10%."""
         
         with st.spinner("✨ Polishing your writing..."):
             response = client.chat.completions.create(
@@ -324,8 +351,12 @@ def init_session_state():
         st.session_state.temp_user_chapter = ""
     if 'temp_ai_style' not in st.session_state:
         st.session_state.temp_ai_style = "creative"
+    if 'temp_ai_level' not in st.session_state:
+        st.session_state.temp_ai_level = "middle_school"
     if 'selected_ai_style' not in st.session_state:
         st.session_state.selected_ai_style = "creative"
+    if 'selected_ai_level' not in st.session_state:
+        st.session_state.selected_ai_level = "middle_school"
 
 # Main app
 def main():
@@ -397,13 +428,14 @@ def story_writing_mode(client):
                            type="primary", 
                            disabled=button_disabled,
                            help="Write at least 200 words to enable AI continuation" if button_disabled else "Generate AI continuation"):
-                    if 'selected_ai_style' in st.session_state:
+                    if 'selected_ai_style' in st.session_state and 'selected_ai_level' in st.session_state:
                         # Create story
                         story_id = create_story(story_title, user_text)
                         st.session_state.current_story_id = story_id
                         st.session_state.story_mode = 'continue'
                         st.session_state.temp_user_chapter = user_text
                         st.session_state.temp_ai_style = st.session_state.selected_ai_style
+                        st.session_state.temp_ai_level = st.session_state.selected_ai_level
                         st.session_state.pending_ai_continuation = True
                         st.rerun()
                 
@@ -442,10 +474,42 @@ def story_writing_mode(client):
                 # Initialize default style if not set
                 if 'selected_ai_style' not in st.session_state:
                     st.session_state.selected_ai_style = 'creative'
+                
+                # AI writing level selection
+                st.markdown("### How smart should AI write?")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("📚 Professional Author", 
+                               type="primary" if st.session_state.get('selected_ai_level') == 'professional' else "secondary",
+                               use_container_width=True,
+                               help="Complex vocabulary and sophisticated writing"):
+                        st.session_state.selected_ai_level = 'professional'
+                        st.rerun()
+                
+                with col2:
+                    if st.button("🎓 College Student", 
+                               type="primary" if st.session_state.get('selected_ai_level') == 'college' else "secondary",
+                               use_container_width=True,
+                               help="Clear, engaging writing for young adults"):
+                        st.session_state.selected_ai_level = 'college'
+                        st.rerun()
+                
+                with col3:
+                    if st.button("🎒 Middle Schooler", 
+                               type="primary" if st.session_state.get('selected_ai_level') == 'middle_school' else "secondary",
+                               use_container_width=True,
+                               help="Simple, fun writing that's easy to read"):
+                        st.session_state.selected_ai_level = 'middle_school'
+                        st.rerun()
+                
+                # Initialize default level if not set
+                if 'selected_ai_level' not in st.session_state:
+                    st.session_state.selected_ai_level = 'middle_school'
             
             with col_right:
                 st.markdown("### 🤖 AI Continuation")
-                st.info("💡 Write at least 200 words and select a style to unlock AI continuation")
+                st.info("💡 Write at least 200 words, then select a style and writing level below to unlock AI continuation")
     
     elif st.session_state.story_mode == 'continue':
         if not st.session_state.current_story_id:
@@ -478,12 +542,15 @@ def story_writing_mode(client):
                     # Generate AI continuation for the original text
                     ai_chapter = generate_next_chapter(client, story_details[1], 
                                                      story_details[1], 
-                                                     st.session_state.temp_ai_style, [])
+                                                     st.session_state.temp_ai_style,
+                                                     st.session_state.temp_ai_level, [])
                     
                     # Save as first chapter - but use empty string for user_content since original is in stories table
                     add_chapter(st.session_state.current_story_id, 1, 
                               "", ai_chapter, 
-                              st.session_state.temp_ai_style, user_rating_score)
+                              st.session_state.temp_ai_style, 
+                              st.session_state.temp_ai_level,
+                              user_rating_score)
                     
                     # Store AI feedback for Chapter 1 (the original opening)
                     store_ai_feedback(st.session_state.current_story_id, 1, user_rating_text)
@@ -493,11 +560,16 @@ def story_writing_mode(client):
                     st.session_state.pending_ai_continuation = False
                     st.session_state.temp_user_chapter = ""
                     st.session_state.temp_ai_style = "creative"
+                    st.session_state.temp_ai_level = "middle_school"
                     st.rerun()
                 
                 # Show initial feedback if available
                 if 'initial_feedback' in st.session_state:
                     st.info(f"💭 AI feedback on your Chapter 1: {st.session_state.initial_feedback}")
+                    if chapters:
+                        ai_level = chapters[0][6] if len(chapters[0]) > 6 else 'middle_school'
+                        level_display = {"professional": "Professional Author", "college": "College Student", "middle_school": "Middle Schooler"}.get(ai_level, "Middle Schooler")
+                        st.markdown(f"📝 AI wrote Chapter 2 at **{level_display}** level")
                     del st.session_state.initial_feedback
                 
                 # Display chapters in two columns
@@ -520,7 +592,11 @@ def story_writing_mode(client):
                     
                     # Display user chapters (starting from chapter 3 if there are more chapters)
                     displayed_user_chapters = 0
-                    for idx, (ch_num, user_content, _, _, _, ai_rating) in enumerate(chapters):
+                    for idx, chapter_data in enumerate(chapters):
+                        ch_num = chapter_data[0]
+                        user_content = chapter_data[1]
+                        ai_rating = chapter_data[5]
+                        
                         if idx == 0 and not user_content:
                             # Skip first record if it's empty (original is in story_details)
                             continue
@@ -552,10 +628,13 @@ def story_writing_mode(client):
                                disabled=button_disabled,
                                help="Write at least 200 words to enable AI continuation" if button_disabled else "Generate AI continuation",
                                key="continue_story_btn"):
-                        if 'selected_ai_style' in st.session_state:
+                        if 'selected_ai_style' in st.session_state and 'selected_ai_level' in st.session_state:
                             # Build story context
                             context = story_details[1] + "\n\n"
-                            for ch_num, user_cont, ai_cont, _, _, _ in chapters:
+                            for chapter_data in chapters:
+                                ch_num = chapter_data[0]
+                                user_cont = chapter_data[1]
+                                ai_cont = chapter_data[2]
                                 context += f"Chapter {ch_num}: {user_cont}\n{ai_cont}\n\n"
                             
                             # Rate user's writing
@@ -566,12 +645,15 @@ def story_writing_mode(client):
                             
                             # Generate AI continuation
                             ai_chapter = generate_next_chapter(client, context, new_chapter, 
-                                                             st.session_state.selected_ai_style, previous_ratings)
+                                                             st.session_state.selected_ai_style,
+                                                             st.session_state.selected_ai_level,
+                                                             previous_ratings)
                             
                             # Save chapter
                             next_chapter_num = len(chapters) + 1
                             add_chapter(st.session_state.current_story_id, next_chapter_num, 
-                                      new_chapter, ai_chapter, st.session_state.selected_ai_style, user_rating_score)
+                                      new_chapter, ai_chapter, st.session_state.selected_ai_style,
+                                      st.session_state.selected_ai_level, user_rating_score)
                             
                             # Store AI feedback
                             # If this is the first user continuation (after the original), it's chapter 3
@@ -585,6 +667,8 @@ def story_writing_mode(client):
                             
                             st.success(f"✅ Chapter {user_chapter_num} (your writing) and Chapter {user_chapter_num + 1} (AI continuation) created!")
                             st.info(f"💭 AI feedback on your writing: {user_rating_text}")
+                            level_display = {"professional": "Professional Author", "college": "College Student", "middle_school": "Middle Schooler"}.get(st.session_state.selected_ai_level, "Middle Schooler")
+                            st.markdown(f"📝 AI wrote at **{level_display}** level with **{st.session_state.selected_ai_style}** style")
                             st.rerun()
                     
                     # AI style selection - always visible
@@ -626,17 +710,59 @@ def story_writing_mode(client):
                     # Initialize default style if not set
                     if 'selected_ai_style' not in st.session_state:
                         st.session_state.selected_ai_style = 'creative'
+                    
+                    # AI writing level selection
+                    st.markdown("### How smart should AI write?")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("📚 Professional Author", 
+                                   type="primary" if st.session_state.get('selected_ai_level') == 'professional' else "secondary",
+                                   use_container_width=True,
+                                   key="prof_btn",
+                                   help="Complex vocabulary and sophisticated writing"):
+                            st.session_state.selected_ai_level = 'professional'
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("🎓 College Student", 
+                                   type="primary" if st.session_state.get('selected_ai_level') == 'college' else "secondary",
+                                   use_container_width=True,
+                                   key="college_btn",
+                                   help="Clear, engaging writing for young adults"):
+                            st.session_state.selected_ai_level = 'college'
+                            st.rerun()
+                    
+                    with col3:
+                        if st.button("🎒 Middle Schooler", 
+                                   type="primary" if st.session_state.get('selected_ai_level') == 'middle_school' else "secondary",
+                                   use_container_width=True,
+                                   key="middle_btn",
+                                   help="Simple, fun writing that's easy to read"):
+                            st.session_state.selected_ai_level = 'middle_school'
+                            st.rerun()
+                    
+                    # Initialize default level if not set
+                    if 'selected_ai_level' not in st.session_state:
+                        st.session_state.selected_ai_level = 'middle_school'
                 
                 with col_right:
                     st.markdown("### 🤖 AI Continuation")
                     
                     # Display AI chapters (starting from chapter 2)
                     if not chapters:
-                        st.info("💡 AI continuation will appear here after you write your first chapter")
+                        st.info("💡 AI will continue your story after you select a style and writing level below")
                     else:
                         # All AI chapters
                         displayed_ai_chapters = 0
-                        for idx, (ch_num, user_content, ai_content, ai_style, user_rating, _) in enumerate(chapters):
+                        for idx, chapter_data in enumerate(chapters):
+                            ch_num = chapter_data[0]
+                            user_content = chapter_data[1]
+                            ai_content = chapter_data[2]
+                            ai_style = chapter_data[3]
+                            user_rating = chapter_data[4]
+                            ai_level = chapter_data[6] if len(chapter_data) > 6 else 'middle_school'
+                            
                             displayed_ai_chapters += 1
                             
                             if displayed_ai_chapters == 1:
@@ -648,7 +774,8 @@ def story_writing_mode(client):
                                 else:
                                     ai_chapter_num = displayed_ai_chapters * 2
                             
-                            st.markdown(f"**Chapter {ai_chapter_num}** ({ai_style})")
+                            level_display = {"professional": "Professional", "college": "College", "middle_school": "Middle School"}.get(ai_level, "Middle School")
+                            st.markdown(f"**Chapter {ai_chapter_num}** ({ai_style}, {level_display} level)")
                             
                             # Rating section
                             if user_rating:
@@ -666,6 +793,7 @@ def story_writing_mode(client):
                                         st.rerun()
                             
                             st.markdown(f"{ai_content}")
+                            st.caption(f"Word count: {len(ai_content.split())}")
                             st.divider()
                             
                             # Rating section
@@ -805,7 +933,9 @@ def story_list_mode():
             if chapters:
                 st.markdown("**Recent Activity:**")
                 # Always show the first AI response (Chapter 2)
-                st.markdown(f"• Chapters 1-2 ({chapters[0][3]}) - "
+                ai_level = chapters[0][6] if len(chapters[0]) > 6 else 'middle_school'
+                level_display = {"professional": "Prof", "college": "College", "middle_school": "MS"}.get(ai_level, "MS")
+                st.markdown(f"• Chapters 1-2 ({chapters[0][3]}, {level_display}) - "
                           f"Your opening: {'⭐' * (chapters[0][5] or 0)}, "
                           f"AI response: {'⭐' * (chapters[0][4] or 0) if chapters[0][4] else 'Not rated'}")
                 
@@ -815,7 +945,9 @@ def story_list_mode():
                     latest = chapters[-1]
                     latest_user_ch = (len(chapters) - 1) * 2 + 1
                     latest_ai_ch = latest_user_ch + 1
-                    st.markdown(f"• Chapters {latest_user_ch}-{latest_ai_ch} ({latest[3]}) - "
+                    ai_level = latest[6] if len(latest) > 6 else 'middle_school'
+                    level_display = {"professional": "Prof", "college": "College", "middle_school": "MS"}.get(ai_level, "MS")
+                    st.markdown(f"• Chapters {latest_user_ch}-{latest_ai_ch} ({latest[3]}, {level_display}) - "
                               f"Your writing: {'⭐' * (latest[5] or 0)}, "
                               f"AI writing: {'⭐' * (latest[4] or 0) if latest[4] else 'Not rated'}")
             
