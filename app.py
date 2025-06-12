@@ -279,6 +279,8 @@ def init_session_state():
         st.session_state.temp_user_chapter = ""
     if 'temp_ai_style' not in st.session_state:
         st.session_state.temp_ai_style = "creative"
+    if 'selected_ai_style' not in st.session_state:
+        st.session_state.selected_ai_style = "creative"
 
 # Main app
 def main():
@@ -344,25 +346,61 @@ def story_writing_mode(client):
                 word_count = len(user_text.split())
                 st.markdown(f"**Word count:** {word_count}/200")
                 
-                if word_count >= 200:
-                    st.markdown("### 🎭 AI Continuation Style")
-                    ai_style = st.selectbox("Choose AI style:", ["creative", "funny", "surprise", "spooky"])
-                    
-                    if st.button("🚀 Create Story & Generate AI Continuation", type="primary"):
+                # Let AI continue button (disabled if < 200 words)
+                button_disabled = word_count < 200
+                if st.button("🤖 Let AI continue the story", 
+                           type="primary", 
+                           disabled=button_disabled,
+                           help="Write at least 200 words to enable AI continuation" if button_disabled else "Generate AI continuation"):
+                    if 'selected_ai_style' in st.session_state:
                         # Create story
                         story_id = create_story(story_title, user_text)
                         st.session_state.current_story_id = story_id
                         st.session_state.story_mode = 'continue'
                         st.session_state.temp_user_chapter = user_text
-                        st.session_state.temp_ai_style = ai_style
+                        st.session_state.temp_ai_style = st.session_state.selected_ai_style
                         st.session_state.pending_ai_continuation = True
                         st.rerun()
-                else:
-                    st.info(f"📝 Please write at least {200 - word_count} more words to continue.")
+                
+                # AI style selection - always visible
+                st.markdown("### Tell AI what you want:")
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    if st.button("😂 Funny", 
+                               type="primary" if st.session_state.get('selected_ai_style') == 'funny' else "secondary",
+                               use_container_width=True):
+                        st.session_state.selected_ai_style = 'funny'
+                        st.rerun()
+                
+                with col2:
+                    if st.button("👻 Spooky", 
+                               type="primary" if st.session_state.get('selected_ai_style') == 'spooky' else "secondary",
+                               use_container_width=True):
+                        st.session_state.selected_ai_style = 'spooky'
+                        st.rerun()
+                
+                with col3:
+                    if st.button("🎲 Surprise", 
+                               type="primary" if st.session_state.get('selected_ai_style') == 'surprise' else "secondary",
+                               use_container_width=True):
+                        st.session_state.selected_ai_style = 'surprise'
+                        st.rerun()
+                
+                with col4:
+                    if st.button("✨ Creative", 
+                               type="primary" if st.session_state.get('selected_ai_style') == 'creative' else "secondary",
+                               use_container_width=True):
+                        st.session_state.selected_ai_style = 'creative'
+                        st.rerun()
+                
+                # Initialize default style if not set
+                if 'selected_ai_style' not in st.session_state:
+                    st.session_state.selected_ai_style = 'creative'
             
             with col_right:
                 st.markdown("### 🤖 AI Continuation")
-                st.info("💡 Write at least 200 words to unlock AI continuation")
+                st.info("💡 Write at least 200 words and select a style to unlock AI continuation")
     
     elif st.session_state.story_mode == 'continue':
         if not st.session_state.current_story_id:
@@ -432,12 +470,14 @@ def story_writing_mode(client):
                     word_count = len(new_chapter.split())
                     st.markdown(f"**Word count:** {word_count}/200")
                     
-                    if word_count >= 200:
-                        st.markdown("### 🎭 AI Continuation Style")
-                        ai_style = st.selectbox("Choose AI style:", ["creative", "funny", "surprise", "spooky"], 
-                                              key="ai_style_select")
-                        
-                        if st.button("🤖 Generate AI Continuation", type="primary"):
+                    # Let AI continue button (disabled if < 200 words)
+                    button_disabled = word_count < 200
+                    if st.button("🤖 Let AI continue the story", 
+                               type="primary", 
+                               disabled=button_disabled,
+                               help="Write at least 200 words to enable AI continuation" if button_disabled else "Generate AI continuation",
+                               key="continue_story_btn"):
+                        if 'selected_ai_style' in st.session_state:
                             # Build story context
                             context = story_details[1] + "\n\n"
                             for ch_num, user_cont, ai_cont, _, _, _ in chapters:
@@ -451,18 +491,56 @@ def story_writing_mode(client):
                             
                             # Generate AI continuation
                             ai_chapter = generate_next_chapter(client, context, new_chapter, 
-                                                             ai_style, previous_ratings)
+                                                             st.session_state.selected_ai_style, previous_ratings)
                             
                             # Save chapter
                             next_chapter_num = len(chapters) + 1
                             add_chapter(st.session_state.current_story_id, next_chapter_num, 
-                                      new_chapter, ai_chapter, ai_style, user_rating_score)
+                                      new_chapter, ai_chapter, st.session_state.selected_ai_style, user_rating_score)
                             
                             st.success(f"✅ Chapter {next_chapter_num} created!")
                             st.info(f"💭 AI feedback on your writing: {user_rating_text}")
                             st.rerun()
-                    else:
-                        st.info(f"📝 Please write at least {200 - word_count} more words to continue.")
+                    
+                    # AI style selection - always visible
+                    st.markdown("### Tell AI what you want:")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        if st.button("😂 Funny", 
+                                   type="primary" if st.session_state.get('selected_ai_style') == 'funny' else "secondary",
+                                   use_container_width=True,
+                                   key="funny_btn"):
+                            st.session_state.selected_ai_style = 'funny'
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("👻 Spooky", 
+                                   type="primary" if st.session_state.get('selected_ai_style') == 'spooky' else "secondary",
+                                   use_container_width=True,
+                                   key="spooky_btn"):
+                            st.session_state.selected_ai_style = 'spooky'
+                            st.rerun()
+                    
+                    with col3:
+                        if st.button("🎲 Surprise", 
+                                   type="primary" if st.session_state.get('selected_ai_style') == 'surprise' else "secondary",
+                                   use_container_width=True,
+                                   key="surprise_btn"):
+                            st.session_state.selected_ai_style = 'surprise'
+                            st.rerun()
+                    
+                    with col4:
+                        if st.button("✨ Creative", 
+                                   type="primary" if st.session_state.get('selected_ai_style') == 'creative' else "secondary",
+                                   use_container_width=True,
+                                   key="creative_btn"):
+                            st.session_state.selected_ai_style = 'creative'
+                            st.rerun()
+                    
+                    # Initialize default style if not set
+                    if 'selected_ai_style' not in st.session_state:
+                        st.session_state.selected_ai_style = 'creative'
                 
                 with col_right:
                     st.markdown("### 🤖 AI Continuation")
@@ -617,7 +695,8 @@ def story_list_mode():
             if st.button(f"📖 Continue This Story", key=f"continue_{story_id}"):
                 st.session_state.current_story_id = story_id
                 st.session_state.story_mode = 'continue'
-                st.switch_page("pages/story_writing.py")  # Adjust based on your page structure
+                st.success("Story loaded! Switch to 📖 Story Writing mode to continue.")
+                st.rerun()
 
 if __name__ == "__main__":
     main()
